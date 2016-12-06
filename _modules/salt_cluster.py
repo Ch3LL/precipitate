@@ -68,6 +68,8 @@ def _get_ip_addr(driver, info, name):
     elif driver == 'openstack':
         for ip_addr in info[name]['public_ips']:
             return salt.utils.to_str(ip_addr)  # either v4 or v6
+    elif driver == 'joyent':
+        return salt.utils.to_str(info[name]['primaryIp'])
 
 
 def _get_driver_creds(profile):
