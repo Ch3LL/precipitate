@@ -13,6 +13,7 @@ import textwrap
 
 # Import salt libs
 import salt.utils
+import salt.utils.yaml
 from salt.exceptions import CommandExecutionError
 
 
@@ -68,9 +69,11 @@ def _get_ip_addr(driver, info, name):
     elif driver == 'openstack':
         for ip_addr in info[name]['public_ips']:
             if salt.utils.network.is_ipv4(ip_addr):
-                return salt.utils.to_str(ip_addr)
+                return salt.utils.to_str(ip_addr)  # either v4 or v6
     elif driver == 'joyent':
         return salt.utils.to_str(info[name]['primaryIp'])
+    elif driver == 'opennebula':
+        return name
 
 
 def _get_driver_creds(profile):
@@ -84,7 +87,7 @@ def _get_driver_creds(profile):
         for file_name in os.listdir(cloud_dir):
             with open(os.path.join(cloud_dir, file_name)) as file_:
                 try:
-                    data = yaml.load(file_.read())
+                    data = salt.utils.yaml.safe_load(file_.read())
                 except yaml.reader.ReaderError:
                     continue
 
@@ -132,7 +135,7 @@ def _add_to_roster(roster, name, host, user, auth, sudo):
     __salt__['file.blockreplace'](roster,
                                   '# -- begin {0} --'.format(name),
                                   '# -- end {0} --'.format(name),
-                                  yaml.dump(entry),
+                                  salt.utils.yaml.safe_dump(entry),
                                   append_if_not_found=True)
 
 
@@ -154,7 +157,7 @@ def _rem_from_roster(roster, name):
                              '')
 
 
-def create_node(name, profile, user='root', roster='/etc/salt/roster', sudo=True):
+def create_node(name=None, profile=None, user='root', roster='/etc/salt/roster', sudo=True, use_map=False, map_file=None):
     '''
     Create a cloud instance using salt-cloud and add it to the cluster roster
 
@@ -162,31 +165,38 @@ def create_node(name, profile, user='root', roster='/etc/salt/roster', sudo=True
 
         salt master-minion salt_cluster.create_node jmoney-master linode-centos-7 root /tmp/roster
     '''
-    creds = _get_driver_creds(profile)
+    if not use_map:
+        creds = _get_driver_creds(profile)
 
-    if not creds:
-        raise CommandExecutionError('Could not find profile or provider data for {0}'.format(profile))
+        if not creds:
+            raise CommandExecutionError('Could not find profile or provider data for {0}'.format(profile))
 
-    if 'driver' in creds:
-        driver = creds['driver']
-    else:
-        raise CommandExecutionError('Could not find cloud driver info for {0}'.format(profile))
+        if 'driver' in creds:
+            driver = creds['driver']
+        else:
+            raise CommandExecutionError('Could not find cloud driver info for {0}'.format(profile))
 
-    if 'ssh_username' in creds:
-        user = creds['ssh_username']
+        if 'ssh_username' in creds:
+            user = creds['ssh_username']
 
-    if 'password' in creds:
-        auth = {'passwd': creds['password']}
-    elif 'ssh_key_file' in creds:
-        auth = {'priv': creds['ssh_key_file']}
-    elif 'private_key' in creds:
-        auth = {'priv': creds['private_key']}
-    else:
-        raise CommandExecutionError('Could not find login auth info for {0}'.format(profile))
+        if 'password' in creds and 'private_key' not in creds:
+            auth = {'passwd': creds['password']}
+        elif 'ssh_key_file' in creds:
+            auth = {'priv': creds['ssh_key_file']}
+        elif 'private_key' in creds:
+            auth = {'priv': creds['private_key']}
+        else:
+            raise CommandExecutionError('Could not find login auth info for {0}'.format(profile))
 
     ret = ''
 
-    args = ['--no-deploy', '--profile', profile, name]
+    if use_map:
+        if not map_file:
+            raise CommandExecutionError('map_file is not specified alongside use_map')
+        args = ['-m', map_file]
+    else:
+        args = ['--no-deploy', '--profile', profile, name]
+
     res = __salt__['cmd.run_all'](_cmd(*args))
 
     # assume that the cloud response is a json object or list and strip any
@@ -198,6 +208,7 @@ def create_node(name, profile, user='root', roster='/etc/salt/roster', sudo=True
         if line.startswith('[') or line.startswith('{'):
             break
     ret += '\n'.join(stdout[:index])  # return message to user
+    log.debug('return value: {0}'.format(stdout))
     res['stdout'] = '\n'.join(stdout[index:])
 
     try:
@@ -205,11 +216,57 @@ def create_node(name, profile, user='root', roster='/etc/salt/roster', sudo=True
     except (TypeError, ValueError) as error:
         raise CommandExecutionError('Could not read json from salt-cloud: {0}: {1}'.format(error, res['stderr']))
 
-    ip_addr = _get_ip_addr(driver, info, name)
-    if ip_addr:
-        _add_to_roster(roster, name, ip_addr, user, auth, sudo)
-        msg = 'Created node {0} from profile {1}'.format(name, profile)
-        return '\n'.join([ret, msg])
+    if use_map:
+        with open(map_file, 'r') as conf:
+            try:
+                file = yaml.safe_load(conf.read()) or {}
+            except yaml.YAMLError:
+                raise "Yaml Error. Could not parse map file"
+
+        msg = []
+        for profile in file:
+            for name in file[profile]:
+                [(name,args)] = name.items()
+                creds = _get_driver_creds(profile)
+
+                if not creds:
+                    raise CommandExecutionError('Could not find profile or provider data for {0}'.format(profile))
+
+                if 'driver' in creds:
+                    driver = creds['driver']
+                else:
+                    raise CommandExecutionError('Could not find cloud driver info for {0}'.format(profile))
+
+                if 'ssh_username' in creds:
+                    user = creds['ssh_username']
+
+                if 'password' in creds and 'private_key' not in creds:
+                    auth = {'passwd': creds['password']}
+                elif 'ssh_key_file' in creds:
+                    auth = {'priv': creds['ssh_key_file']}
+                elif 'private_key' in creds:
+                    auth = {'priv': creds['private_key']}
+                else:
+                    raise CommandExecutionError('Could not find login auth info for {0}'.format(profile))
+
+                ip_addr = _get_ip_addr(driver, info, name)
+                if ip_addr:
+                    #Don't add windows host to ssh roster
+                    if 'win' in name:
+                        msg.append('Did not add {0} to roster file because its a windows VM'.format(name))
+                    else:
+                        add_roster = _add_to_roster(roster, name, ip_addr, user, auth, sudo)
+                        log.debug('add_to_roster call is : {0}'.format(add_roster))
+                        msg.append('Created node {0} from profile {1}'.format(name, profile))
+        if msg:
+            return '\n'.join(msg)
+    else:
+        ip_addr = _get_ip_addr(driver, info, name)
+        if ip_addr:
+            add_roster = _add_to_roster(roster, name, ip_addr, user, auth, sudo)
+            log.debug('add_to_roster call is : {0}'.format(add_roster))
+            msg = 'Created node {0} from profile {1}'.format(name, profile)
+            return True
 
     error = 'Failed to create node {0} from profile {1}: {2}'.format(name, profile, res['stderr'])
     log.error(error)
