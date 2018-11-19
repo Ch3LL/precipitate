@@ -6,14 +6,16 @@ from __future__ import absolute_import
 
 # Import python libs
 import os
-import yaml
 import json
 import logging
 import textwrap
 
 # Import salt libs
 import salt.utils
-import salt.utils.yaml
+try:
+    import salt.utils.yaml as yaml
+except ImportError:
+    import yaml
 from salt.exceptions import CommandExecutionError
 
 
@@ -65,7 +67,7 @@ def _get_ip_addr(driver, info, name):
                 if not _is_private_addr(net['ip_address']):
                     return salt.utils.to_str(net['ip_address'])
     elif driver == 'ec2':
-        return salt.utils.to_str(info[name]['ipAddress'])
+        return salt.utils.to_str(info[name]['privateIpAddress'])
     elif driver == 'openstack':
         for ip_addr in info[name]['public_ips']:
             if salt.utils.network.is_ipv4(ip_addr):
@@ -87,7 +89,7 @@ def _get_driver_creds(profile):
         for file_name in os.listdir(cloud_dir):
             with open(os.path.join(cloud_dir, file_name)) as file_:
                 try:
-                    data = salt.utils.yaml.safe_load(file_.read())
+                    data = yaml.safe_load(file_.read())
                 except yaml.reader.ReaderError:
                     continue
 
@@ -135,7 +137,7 @@ def _add_to_roster(roster, name, host, user, auth, sudo):
     __salt__['file.blockreplace'](roster,
                                   '# -- begin {0} --'.format(name),
                                   '# -- end {0} --'.format(name),
-                                  salt.utils.yaml.safe_dump(entry),
+                                  yaml.safe_dump(entry),
                                   append_if_not_found=True)
 
 
